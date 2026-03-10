@@ -1,0 +1,4 @@
+interface:
+  display_name: "Continuous Learning"
+  short_description: "Capture and promote repo learning"
+  default_prompt: "Use $continuous-learning to capture this session's durable repo knowledge and promote the right updates."

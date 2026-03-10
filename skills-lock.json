@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": {
+    "agentic-development": {
+      "source": "alvarovillalbaa/agent-suite",
+      "sourceType": "github",
+      "computedHash": "7b4e659c67c5f95a2d786146c48876edfb7f61150f010ddc442cdb2daf33d1cd"
+    },
+    "code-documentation": {
+      "source": "alvarovillalbaa/agent-suite",
+      "sourceType": "github",
+      "computedHash": "f2765aec2d69c254d186f9abb27f8073970cbc7342fd61cc0b4425efbcf77e9e"
+    },
+    "continuous-learning": {
+      "source": "alvarovillalbaa/agent-suite",
+      "sourceType": "github",
+      "computedHash": "a7358fbb4e437564fc30a1eb81a83ff253442c4684815fcbcb63774dbc04296b"
+    },
+    "quality-assurance": {
+      "source": "alvarovillalbaa/agent-suite",
+      "sourceType": "github",
+      "computedHash": "6135c191e3cda250a98ea0221fc0dc6cc316a5acff5ee96afbbae7b15f2da9c9"
+    }
+  }
+}
