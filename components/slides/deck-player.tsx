@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useState, useTransition } from "react"
+import { useEffect, useMemo, useState, useTransition } from "react"
 
 import { unlockDeckAction } from "@/app/actions/decks"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { assignExperimentVersion } from "@/lib/experiments"
 import type { DeckRecord, DeckVersion, PublicDeckView } from "@/lib/types"
 
 function slideBlockToText(version: DeckVersion, slideIndex: number) {
@@ -74,6 +76,18 @@ function slideBlockToText(version: DeckVersion, slideIndex: number) {
   })
 }
 
+function createInitialLeadValues(version: DeckVersion) {
+  return Object.fromEntries(version.source.leadCapture.fields.map((field) => [field.key, ""]))
+}
+
+async function postEvent(payload: Record<string, unknown>) {
+  await fetch("/api/events", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
 export function PublicAccessGate({ deck }: { deck: DeckRecord }) {
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
@@ -126,64 +140,109 @@ export function DeckPlayer({
   view: PublicDeckView
   embedded?: boolean
 }) {
+  const [visitorId] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null
+    }
+
+    return window.localStorage.getItem("slides_visitor_id") ?? crypto.randomUUID()
+  })
+  const assetCount = useMemo(() => view.deck.assets.filter((asset) => asset.url).length, [view.deck.assets])
+  const experimentAssignment = useMemo(
+    () => (visitorId ? assignExperimentVersion(view.deck, visitorId) : null),
+    [view.deck, visitorId],
+  )
+  const activeVersion = experimentAssignment?.version ?? view.version
+  const activeVariantLabel = experimentAssignment?.label ?? null
+
+  useEffect(() => {
+    if (visitorId) {
+      window.localStorage.setItem("slides_visitor_id", visitorId)
+    }
+  }, [visitorId])
+
+  return (
+    <DeckPlayerSurface
+      key={activeVersion.id}
+      view={view}
+      embedded={embedded}
+      visitorId={visitorId}
+      activeVersion={activeVersion}
+      activeVariantLabel={activeVariantLabel}
+      assetCount={assetCount}
+    />
+  )
+}
+
+function DeckPlayerSurface({
+  view,
+  embedded,
+  visitorId,
+  activeVersion,
+  activeVariantLabel,
+  assetCount,
+}: {
+  view: PublicDeckView
+  embedded: boolean
+  visitorId: string | null
+  activeVersion: DeckVersion
+  activeVariantLabel: string | null
+  assetCount: number
+}) {
   const [currentSlide, setCurrentSlide] = useState(0)
   const [leadState, setLeadState] = useState<"idle" | "submitting" | "submitted">("idle")
-  const [leadName, setLeadName] = useState("")
-  const [leadEmail, setLeadEmail] = useState("")
-  const version = view.version
-  const slide = version.source.slides[currentSlide]
+  const [leadError, setLeadError] = useState<string | null>(null)
+  const [leadValues, setLeadValues] = useState<Record<string, string>>(() => createInitialLeadValues(activeVersion))
+  const slide = activeVersion.source.slides[currentSlide] ?? activeVersion.source.slides[0]
 
   useEffect(() => {
-    const visitorId =
-      window.localStorage.getItem("slides_visitor_id") ?? crypto.randomUUID()
-    window.localStorage.setItem("slides_visitor_id", visitorId)
+    if (!visitorId) {
+      return
+    }
 
-    void fetch("/api/events", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        deckId: view.deck.id,
-        publicId: view.deck.publicId,
-        versionId: version.id,
-        type: "view",
-        visitorId,
-      }),
+    void postEvent({
+      deckId: view.deck.id,
+      publicId: view.deck.publicId,
+      versionId: activeVersion.id,
+      type: "view",
+      visitorId,
     })
-  }, [version.id, view.deck.id, view.deck.publicId])
+  }, [activeVersion.id, visitorId, view.deck.id, view.deck.publicId])
 
   useEffect(() => {
-    const visitorId = window.localStorage.getItem("slides_visitor_id")
     if (!visitorId || !slide) {
       return
     }
 
-    void fetch("/api/events", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        deckId: view.deck.id,
-        publicId: view.deck.publicId,
-        versionId: version.id,
-        slideId: slide.id,
-        type: "slide_view",
-        visitorId,
-      }),
+    void postEvent({
+      deckId: view.deck.id,
+      publicId: view.deck.publicId,
+      versionId: activeVersion.id,
+      slideId: slide.id,
+      type: "slide_view",
+      visitorId,
     })
-  }, [currentSlide, slide, version.id, view.deck.id, view.deck.publicId])
+  }, [activeVersion.id, currentSlide, slide, visitorId, view.deck.id, view.deck.publicId])
 
   async function submitLead() {
+    const missingRequiredField = activeVersion.source.leadCapture.fields.find(
+      (field) => field.required && !leadValues[field.key]?.trim(),
+    )
+    if (missingRequiredField) {
+      setLeadError(`Missing required field: ${missingRequiredField.label}.`)
+      return
+    }
+
     setLeadState("submitting")
+    setLeadError(null)
     await fetch("/api/leads", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         deckId: view.deck.id,
         publicId: view.deck.publicId,
-        versionId: version.id,
-        payload: {
-          name: leadName,
-          email: leadEmail,
-        },
+        versionId: activeVersion.id,
+        payload: leadValues,
       }),
     })
     setLeadState("submitted")
@@ -193,8 +252,8 @@ export function DeckPlayer({
     <div
       className="min-h-screen px-4 py-5 sm:px-8"
       style={{
-        background: version.source.theme.gradient,
-        color: version.source.theme.foreground,
+        background: activeVersion.source.theme.gradient,
+        color: activeVersion.source.theme.foreground,
       }}
     >
       <div className={`mx-auto grid w-full gap-5 ${embedded ? "max-w-5xl" : "max-w-6xl"}`}>
@@ -205,77 +264,83 @@ export function DeckPlayer({
               <h1 className="mt-1 text-lg font-semibold">{view.deck.title}</h1>
             </div>
             <div className="flex items-center gap-3 text-sm text-foreground/70">
+              {activeVariantLabel ? <span className="rounded-full bg-black/6 px-3 py-1 text-xs">Experiment: {activeVariantLabel}</span> : null}
               <span>{currentSlide + 1}</span>
               <span>/</span>
-              <span>{version.source.slides.length}</span>
+              <span>{activeVersion.source.slides.length}</span>
             </div>
           </header>
         ) : null}
 
         {view.deck.experiment ? (
           <div className="rounded-[24px] border border-black/8 bg-white/48 px-4 py-3 text-sm text-foreground/70 backdrop-blur-xl">
-            Experiment configured: {view.deck.experiment.name}. The editor exposes version candidates and reviewable publish history.
+            Experiment configured: {view.deck.experiment.name}. Question: {view.deck.experiment.question}
           </div>
         ) : null}
 
         <section
           className="rounded-[38px] border px-6 py-8 shadow-[0_30px_100px_rgba(15,23,42,0.18)] backdrop-blur-xl sm:px-10 sm:py-10"
           style={{
-            background: version.source.theme.card,
-            color: version.source.theme.cardForeground,
-            borderColor: version.source.theme.border,
+            background: activeVersion.source.theme.card,
+            color: activeVersion.source.theme.cardForeground,
+            borderColor: activeVersion.source.theme.border,
           }}
         >
           <div className="flex flex-wrap items-center justify-between gap-4 text-xs uppercase tracking-[0.18em] text-foreground/55">
-            <span>{slide.kicker}</span>
-            <span>{version.source.audience}</span>
+            <span>{slide?.kicker}</span>
+            <span>{activeVersion.source.audience}</span>
           </div>
           <div className="mt-6 grid gap-8 xl:grid-cols-[1.1fr_0.9fr]">
             <div>
               <h2
                 className="text-4xl font-semibold tracking-[-0.05em] sm:text-6xl"
-                style={{ fontFamily: version.source.theme.displayFont }}
+                style={{ fontFamily: activeVersion.source.theme.displayFont }}
               >
-                {slide.title}
+                {slide?.title}
               </h2>
-              <p className="mt-5 max-w-3xl text-lg leading-8 text-foreground/72">{slide.summary}</p>
+              <p className="mt-5 max-w-3xl text-lg leading-8 text-foreground/72">{slide?.summary}</p>
               <div className="mt-8 grid gap-4 text-base leading-7 text-foreground/78">
-                {slideBlockToText(version, currentSlide)}
+                {slide ? slideBlockToText(activeVersion, currentSlide) : null}
               </div>
             </div>
 
             <div className="grid gap-4">
               <div
                 className="rounded-[28px] border p-5"
-                style={{ borderColor: version.source.theme.border, background: version.source.theme.accentSoft }}
+                style={{ borderColor: activeVersion.source.theme.border, background: activeVersion.source.theme.accentSoft }}
               >
                 <p className="text-xs uppercase tracking-[0.18em] text-foreground/56">On-brand system</p>
-                <p className="mt-3 text-sm leading-7 text-foreground/76">{version.source.narrative}</p>
+                <p className="mt-3 text-sm leading-7 text-foreground/76">{activeVersion.source.narrative}</p>
+                {activeVersion.source.brand.brandKit ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {Object.values(activeVersion.source.brand.brandKit.colors)
+                      .slice(0, 4)
+                      .map((color) => (
+                        <span key={color} className="size-7 rounded-full border border-black/10" style={{ background: color }} />
+                      ))}
+                  </div>
+                ) : null}
               </div>
               <div
                 className="rounded-[28px] border p-5"
-                style={{ borderColor: version.source.theme.border, background: "rgba(255,255,255,0.35)" }}
+                style={{ borderColor: activeVersion.source.theme.border, background: "rgba(255,255,255,0.35)" }}
               >
                 <p className="text-xs uppercase tracking-[0.18em] text-foreground/56">Poll</p>
-                <p className="mt-3 text-lg font-semibold">{version.source.poll.question}</p>
+                <p className="mt-3 text-lg font-semibold">{activeVersion.source.poll.question}</p>
                 <div className="mt-4 grid gap-2">
-                  {version.source.poll.options.map((option) => (
+                  {activeVersion.source.poll.options.map((option) => (
                     <button
                       key={option}
                       type="button"
                       className="rounded-full border border-black/8 px-4 py-2 text-left text-sm transition-colors hover:bg-black/5"
                       onClick={() =>
-                        fetch("/api/events", {
-                          method: "POST",
-                          headers: { "content-type": "application/json" },
-                          body: JSON.stringify({
-                            deckId: view.deck.id,
-                            publicId: view.deck.publicId,
-                            versionId: version.id,
-                            type: "poll_vote",
-                            value: option,
-                            visitorId: window.localStorage.getItem("slides_visitor_id"),
-                          }),
+                        postEvent({
+                          deckId: view.deck.id,
+                          publicId: view.deck.publicId,
+                          versionId: activeVersion.id,
+                          type: "poll_vote",
+                          value: option,
+                          visitorId,
                         })
                       }
                     >
@@ -291,7 +356,7 @@ export function DeckPlayer({
         <section className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
           <div className="rounded-[32px] border border-black/8 bg-white/50 p-5 backdrop-blur-xl">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {version.source.slides.map((item, index) => (
+              {activeVersion.source.slides.map((item, index) => (
                 <button
                   key={item.id}
                   type="button"
@@ -309,45 +374,98 @@ export function DeckPlayer({
 
           <div className="rounded-[32px] border border-black/8 bg-white/50 p-5 backdrop-blur-xl">
             <p className="text-xs uppercase tracking-[0.18em] text-foreground/58">CTA + lead capture</p>
-            <h3 className="mt-3 text-2xl font-semibold">{version.source.leadCapture.headline}</h3>
+            <h3 className="mt-3 text-2xl font-semibold">{activeVersion.source.leadCapture.headline}</h3>
             <p className="mt-2 text-sm leading-7 text-foreground/72">
-              {version.source.leadCapture.description}
+              {activeVersion.source.leadCapture.description}
             </p>
+            <p className="mt-3 text-sm text-foreground/60">{activeVersion.source.cta.helperText}</p>
             <div className="mt-5 grid gap-3">
-              <Input value={leadName} onChange={(event) => setLeadName(event.target.value)} placeholder="Name" />
-              <Input value={leadEmail} onChange={(event) => setLeadEmail(event.target.value)} placeholder="Email" />
+              {activeVersion.source.leadCapture.enabled
+                ? activeVersion.source.leadCapture.fields.map((field) => (
+                    field.type === "textarea" ? (
+                      <Textarea
+                        key={field.key}
+                        value={leadValues[field.key] ?? ""}
+                        onChange={(event) =>
+                          setLeadValues((current) => ({
+                            ...current,
+                            [field.key]: event.target.value,
+                          }))
+                        }
+                        placeholder={field.placeholder}
+                      />
+                    ) : (
+                      <Input
+                        key={field.key}
+                        type={field.type === "email" ? "email" : "text"}
+                        value={leadValues[field.key] ?? ""}
+                        onChange={(event) =>
+                          setLeadValues((current) => ({
+                            ...current,
+                            [field.key]: event.target.value,
+                          }))
+                        }
+                        placeholder={field.placeholder}
+                      />
+                    )
+                  ))
+                : null}
+              {leadError ? <p className="text-sm text-rose-600">{leadError}</p> : null}
               <div className="flex flex-wrap gap-3">
                 <Button
                   type="button"
                   onClick={() => {
-                    void fetch("/api/events", {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({
-                        deckId: view.deck.id,
-                        publicId: view.deck.publicId,
-                        versionId: version.id,
-                        type: "cta_click",
-                        visitorId: window.localStorage.getItem("slides_visitor_id"),
-                      }),
+                    void postEvent({
+                      deckId: view.deck.id,
+                      publicId: view.deck.publicId,
+                      versionId: activeVersion.id,
+                      type: "cta_click",
+                      visitorId,
                     })
-                    window.open(version.source.cta.href, "_blank", "noopener,noreferrer")
+                    window.open(activeVersion.source.cta.href, "_blank", "noopener,noreferrer")
                   }}
                 >
-                  {version.source.cta.label}
+                  {activeVersion.source.cta.label}
                 </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={submitLead}
-                  disabled={leadState === "submitting" || leadState === "submitted"}
-                >
-                  {leadState === "submitted" ? "Lead captured" : leadState === "submitting" ? "Submitting..." : "Submit lead"}
-                </Button>
+                {activeVersion.source.leadCapture.enabled ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={submitLead}
+                    disabled={leadState === "submitting" || leadState === "submitted"}
+                  >
+                    {leadState === "submitted"
+                      ? "Lead captured"
+                      : leadState === "submitting"
+                        ? "Submitting..."
+                        : "Submit lead"}
+                  </Button>
+                ) : null}
               </div>
             </div>
           </div>
         </section>
+
+        {assetCount ? (
+          <section className="rounded-[32px] border border-black/8 bg-white/50 p-5 backdrop-blur-xl">
+            <p className="text-xs uppercase tracking-[0.18em] text-foreground/58">Assets</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {view.deck.assets.map((asset) => (
+                <a
+                  key={asset.id}
+                  href={asset.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-[24px] border border-black/8 bg-white/75 p-4 transition-colors hover:bg-white"
+                >
+                  <p className="text-xs uppercase tracking-[0.16em] text-foreground/55">{asset.kind}</p>
+                  <p className="mt-2 text-sm font-medium">{asset.title}</p>
+                  <p className="mt-2 text-sm text-foreground/68">{asset.description}</p>
+                </a>
+              ))}
+            </div>
+          </section>
+        ) : null}
       </div>
     </div>
   )

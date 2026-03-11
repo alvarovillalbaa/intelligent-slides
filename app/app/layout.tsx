@@ -2,6 +2,7 @@ import Link from "next/link"
 
 import { signOutAction } from "@/app/actions/auth"
 import { Button } from "@/components/ui/button"
+import { repository } from "@/lib/repository"
 import { requireSessionUser } from "@/lib/server-auth"
 
 export default async function AppLayout({
@@ -10,6 +11,8 @@ export default async function AppLayout({
   children: React.ReactNode
 }>) {
   const sessionUser = await requireSessionUser()
+  const dashboard = await repository.getDashboard(sessionUser.id)
+  const workspaces = dashboard?.team.workspaces ?? []
 
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,_#fdf8f3_0%,_#f5f8ff_100%)]">
@@ -44,6 +47,27 @@ export default async function AppLayout({
               Public sample
             </Link>
           </nav>
+
+          <div className="mt-8 rounded-[28px] border border-white/10 bg-white/6 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-white/48">Workspaces</p>
+            <div className="mt-4 grid gap-2">
+              {workspaces.map((workspace) => (
+                <Link
+                  key={workspace.id}
+                  href={`/app/workspaces/${workspace.slug}`}
+                  className={`rounded-2xl px-3 py-3 text-sm transition-colors ${
+                    workspace.slug === sessionUser.workspaceSlug ? "bg-white text-[#102114]" : "bg-white/4 text-white/76 hover:bg-white/10"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-medium">{workspace.name}</span>
+                    <span className="text-xs uppercase tracking-[0.16em] opacity-60">{workspace.decks.length}</span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs opacity-60">{workspace.description}</p>
+                </Link>
+              ))}
+            </div>
+          </div>
 
           <div className="mt-8 rounded-[28px] border border-white/10 bg-white/6 p-4">
             <p className="text-xs uppercase tracking-[0.18em] text-white/48">Team model</p>

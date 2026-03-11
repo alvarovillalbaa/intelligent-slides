@@ -2,12 +2,16 @@ import { ConvexHttpClient } from "convex/browser"
 import { nanoid } from "nanoid"
 
 import { api } from "@/convex/_generated/api"
+import { buildInitialDeckAssets, buildStoredInputAssets, type StoredInputAsset } from "@/lib/deck-assets"
 import { buildStandaloneDeckHtml, remixTheme } from "@/lib/deck-runtime"
 import { demoStore } from "@/lib/demo-store"
 import { hasConvexAdminEnv } from "@/lib/env"
+import { writePublishedArtifact, writeStoredText } from "@/lib/storage"
 import type {
   AnalyticsEvent,
+  AssetRecord,
   DashboardData,
+  DeckExperiment,
   DeckRecord,
   GenerationInput,
   LeadRecord,
@@ -15,6 +19,7 @@ import type {
   ReviewRequest,
   ReviewView,
   SessionRecord,
+  TeamInviteRecord,
   UserRecord,
 } from "@/lib/types"
 import { slugify } from "@/lib/utils"
@@ -38,8 +43,26 @@ function createConvexClient(): UntypedConvexClient {
   return client
 }
 
+function createEmptyAnalytics(): DeckRecord["analytics"] {
+  return {
+    views: 0,
+    uniqueVisitors: 0,
+    completionRate: 0,
+    avgTimeSeconds: 0,
+    ctaClicks: 0,
+    leads: 0,
+    slideViews: {},
+    pollVotes: {},
+    variantMetrics: {},
+  }
+}
+
 function getPublishedVersion(deck: DeckRecord) {
-  return deck.versions.find((version) => version.id === deck.publishedVersionId) ?? deck.versions[0]
+  if (!deck.publishedVersionId) {
+    return null
+  }
+
+  return deck.versions.find((version) => version.id === deck.publishedVersionId) ?? null
 }
 
 function normalizeDashboard(raw: unknown): DashboardData | null {
@@ -47,6 +70,7 @@ function normalizeDashboard(raw: unknown): DashboardData | null {
     sessionUser?: DashboardData["sessionUser"]
     team?: DashboardData["team"]
     workspace?: DashboardData["workspace"]
+    workspaces?: DashboardData["team"]["workspaces"]
     decks?: DashboardData["decks"]
   }
 
@@ -58,12 +82,17 @@ function normalizeDashboard(raw: unknown): DashboardData | null {
     sessionUser: data.sessionUser,
     team: {
       ...data.team,
-      workspaces: [
-        {
-          ...data.workspace,
-          decks: data.decks,
-        },
-      ],
+      invites: data.team.invites ?? [],
+      workspaces:
+        data.workspaces?.map((workspace) => ({
+          ...workspace,
+          decks: workspace.decks ?? [],
+        })) ?? [
+          {
+            ...data.workspace,
+            decks: data.decks,
+          },
+        ],
     },
     workspace: {
       ...data.workspace,
@@ -71,6 +100,31 @@ function normalizeDashboard(raw: unknown): DashboardData | null {
     },
     decks: data.decks,
   }
+}
+
+async function persistInputFiles(teamSlug: string, deckPublicId: string, files: Array<{
+  name: string
+  content: string
+  type: string
+}>): Promise<StoredInputAsset[]> {
+  return Promise.all(
+    files.map(async (file) => {
+      const stored = await writeStoredText({
+        namespace: ["uploads", teamSlug, deckPublicId, "sources"],
+        fileName: file.name,
+        content: file.content,
+        contentType: file.type || "text/plain",
+      })
+
+      return {
+        fileName: file.name,
+        url: stored.url,
+        storageKey: stored.storageKey,
+        contentType: stored.contentType,
+        sizeBytes: stored.sizeBytes,
+      }
+    }),
+  )
 }
 
 function normalizePublicView(raw: unknown): PublicDeckView | null {
@@ -99,12 +153,30 @@ function normalizePublicView(raw: unknown): PublicDeckView | null {
   }
 }
 
-async function getDeckFromConvex(deckId: string) {
+async function getDeckFromConvex(userId: string, deckId: string) {
   const client = createConvexClient()
-  const data = (await client.query(convexApi.app.getDeckEditor, { deckId })) as {
+  const data = (await client.query(convexApi.app.getDeckEditor, {
+    userId,
+    deckId,
+  })) as {
     deck?: DeckRecord
   } | null
   return data?.deck ? (data.deck as DeckRecord) : null
+}
+
+function assertWorkspaceAccess(dashboard: DashboardData, workspaceId: string) {
+  const workspace = dashboard.team.workspaces.find((item) => item.id === workspaceId)
+  if (!workspace) {
+    throw new Error("Workspace not found.")
+  }
+  return workspace
+}
+
+function assertDeckAccess(dashboard: DashboardData, deck: DeckRecord | null) {
+  if (!deck || deck.teamId !== dashboard.team.id) {
+    throw new Error("Deck not found.")
+  }
+  return deck
 }
 
 export const repository = {
@@ -194,11 +266,28 @@ export const repository = {
     }
 
     const dashboard = await this.getDashboard(userId)
-    if (!dashboard || dashboard.workspace.slug !== workspaceSlug) {
+    if (!dashboard) {
       return null
     }
 
-    return dashboard
+    const workspaceSummary = dashboard.team.workspaces.find((workspace) => workspace.slug === workspaceSlug)
+    if (!workspaceSummary) {
+      return null
+    }
+
+    const workspace = (await createConvexClient().query(convexApi.app.getWorkspaceById, {
+      workspaceId: workspaceSummary.id,
+    })) as DashboardData["workspace"] | null
+
+    if (!workspace) {
+      return null
+    }
+
+    return {
+      ...dashboard,
+      workspace,
+      decks: workspace.decks,
+    }
   },
 
   async getDeckEditor(userId: string, deckId: string) {
@@ -208,7 +297,7 @@ export const repository = {
 
     const client = createConvexClient()
     const sessionDashboard = await this.getDashboard(userId)
-    const data = (await client.query(convexApi.app.getDeckEditor, { deckId })) as {
+    const data = (await client.query(convexApi.app.getDeckEditor, { userId, deckId })) as {
       deck?: DeckRecord
       team?: DashboardData["team"]
       workspace?: DashboardData["workspace"]
@@ -222,11 +311,173 @@ export const repository = {
       sessionUser: sessionDashboard.sessionUser,
       team: {
         ...data.team,
-        workspaces: [data.workspace],
+        workspaces: data.team?.workspaces ?? [data.workspace],
       },
       workspace: data.workspace,
       deck: data.deck as DeckRecord,
     }
+  },
+
+  async createWorkspace(userId: string, input: { name: string; description: string }) {
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+
+    const baseSlug = slugify(input.name)
+    const existingSlugs = new Set(dashboard.team.workspaces.map((workspace) => workspace.slug))
+    let slug = baseSlug
+    let suffix = 2
+    while (existingSlugs.has(slug)) {
+      slug = `${baseSlug.slice(0, 58)}-${suffix}`
+      suffix += 1
+    }
+
+    if (!hasConvexAdminEnv()) {
+      return demoStore.createWorkspace(userId, {
+        ...input,
+        slug,
+      })
+    }
+
+    const createdAt = Date.now()
+    const workspace = {
+      teamId: dashboard.team.id,
+      slug,
+      name: input.name.trim(),
+      description: input.description.trim() || "A new workspace for a focused deck stream.",
+      createdAt,
+    }
+
+    return (await createConvexClient().mutation(convexApi.app.createWorkspace, {
+      workspace,
+    })) as DashboardData["workspace"]
+  },
+
+  async createInvite(userId: string, input: {
+    email: string
+    invitedName: string
+    role: TeamInviteRecord["role"]
+    workspaceId: string
+  }) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.createInvite(userId, input)
+    }
+
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+
+    const existingUser = await this.getUserByEmail(input.email)
+    if (existingUser) {
+      throw new Error("That email already has an account.")
+    }
+
+    if (!dashboard.team.workspaces.some((workspace) => workspace.id === input.workspaceId)) {
+      throw new Error("Workspace not found.")
+    }
+
+    const invite = {
+      teamId: dashboard.team.id,
+      workspaceId: input.workspaceId,
+      email: input.email.trim().toLowerCase(),
+      invitedName: input.invitedName.trim() || input.email.split("@")[0]!,
+      role: input.role,
+      token: nanoid(24),
+      status: "pending" as const,
+      createdAt: Date.now(),
+      invitedByUserId: userId,
+    }
+
+    return (await createConvexClient().mutation(convexApi.auth.createInvite, {
+      invite,
+    })) as TeamInviteRecord
+  },
+
+  async getInviteByToken(token: string) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.getInviteByToken(token)
+    }
+
+    const invite = (await createConvexClient().query(convexApi.auth.getInviteByToken, {
+      token,
+    })) as TeamInviteRecord | null
+
+    if (!invite) {
+      return null
+    }
+
+    const team = await createConvexClient().query(convexApi.app.getTeamById, {
+      teamId: invite.teamId,
+    })
+    const workspace = await createConvexClient().query(convexApi.app.getWorkspaceById, {
+      workspaceId: invite.workspaceId,
+    })
+
+    return {
+      invite,
+      team: team as DashboardData["team"] | null,
+      workspace: workspace as DashboardData["workspace"] | null,
+    }
+  },
+
+  async acceptInvite(input: {
+    token: string
+    name: string
+    passwordHash: string
+  }) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.acceptInvite(input)
+    }
+
+    const inviteView = await this.getInviteByToken(input.token)
+    if (!inviteView?.invite || !inviteView.team || !inviteView.workspace) {
+      throw new Error("Invite not found.")
+    }
+
+    if (inviteView.invite.status !== "pending") {
+      throw new Error("This invite is no longer active.")
+    }
+
+    if (await this.getUserByEmail(inviteView.invite.email)) {
+      throw new Error("That email already has an account.")
+    }
+
+    const user = (await createConvexClient().mutation(convexApi.auth.acceptInvite, {
+      token: input.token,
+      name: input.name.trim(),
+      passwordHash: input.passwordHash,
+    })) as UserRecord | null
+
+    if (!user) {
+      throw new Error("Unable to accept invite.")
+    }
+
+    return user
+  },
+
+  async updateTeamMemberRole(userId: string, targetUserId: string, role: TeamInviteRecord["role"]) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.updateTeamMemberRole(userId, targetUserId, role)
+    }
+
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+
+    if (!dashboard.team.members.some((member) => member.userId === targetUserId)) {
+      throw new Error("Team member not found.")
+    }
+
+    await createConvexClient().mutation(convexApi.auth.updateTeamMemberRole, {
+      teamId: dashboard.team.id,
+      targetUserId,
+      role,
+    })
+
+    return role
   },
 
   async createDeckFromGeneration(userId: string, workspaceId: string, input: GenerationInput, source: DeckRecord["source"]) {
@@ -238,13 +489,33 @@ export const repository = {
     if (!dashboard) {
       throw new Error("Unable to load dashboard")
     }
+    assertWorkspaceAccess(dashboard, workspaceId)
 
     const createdAt = Date.now()
+    const publicId = nanoid(10)
+    const initialVersionId = nanoid(12)
+    const artifactHtml = buildStandaloneDeckHtml(source, slugify(source.title), {
+      teamName: dashboard.team.name,
+      publicId,
+      versionId: initialVersionId,
+    })
+    const publishedArtifact = await writePublishedArtifact({
+      publicId,
+      versionId: initialVersionId,
+      html: artifactHtml,
+      metadata: {
+        deckTitle: source.title,
+        createdAt,
+      },
+    })
+    const persistedInputAssets = buildStoredInputAssets(
+      await persistInputFiles(dashboard.team.slug, publicId, input.files),
+    )
     const deck: DeckRecord = {
       id: "",
       teamId: dashboard.team.id,
       workspaceId,
-      publicId: nanoid(10),
+      publicId,
       slug: slugify(source.title),
       title: source.title,
       description: source.summary,
@@ -265,32 +536,20 @@ export const repository = {
       ],
       versions: [
         {
-          id: nanoid(12),
+          id: initialVersionId,
           label: "Version A",
           createdAt,
-          status: "published",
+          status: "preview",
           source,
-          artifactHtml: buildStandaloneDeckHtml(source, slugify(source.title)),
+          artifactHtml,
+          artifactStorageKey: publishedArtifact.artifactStorageKey,
+          artifactUrl: publishedArtifact.artifactUrl,
         },
       ],
       publishedVersionId: undefined,
       reviewRequests: [],
-      analytics: {
-        views: 0,
-        uniqueVisitors: 0,
-        completionRate: 0,
-        avgTimeSeconds: 0,
-        ctaClicks: 0,
-        leads: 0,
-        slideViews: {},
-      },
-      assets: input.files.map((file) => ({
-        id: nanoid(8),
-        kind: "document",
-        title: file.name,
-        description: "Uploaded generation context.",
-        url: file.name,
-      })),
+      analytics: createEmptyAnalytics(),
+      assets: [...persistedInputAssets, ...buildInitialDeckAssets({ ...input, files: [] }, source)],
       themeMode: input.themeMode,
       passwordProtected: false,
     }
@@ -308,10 +567,11 @@ export const repository = {
       return demoStore.saveCheckpoint(userId, deckId, source, prompt, title)
     }
 
-    const deck = await getDeckFromConvex(deckId)
-    if (!deck) {
-      throw new Error("Deck not found")
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
     }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
 
     const checkpoints = [
       {
@@ -331,6 +591,7 @@ export const repository = {
         source,
         title: source.title,
         description: source.summary,
+        slug: slugify(source.title),
         updatedAt: Date.now(),
         checkpoints,
       },
@@ -344,18 +605,37 @@ export const repository = {
       return demoStore.publishVersion(userId, deckId, source, label, passwordHash)
     }
 
-    const deck = await getDeckFromConvex(deckId)
-    if (!deck) {
-      throw new Error("Deck not found")
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
     }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
 
+    const versionId = nanoid(12)
+    const artifactHtml = buildStandaloneDeckHtml(source, slugify(source.title), {
+      teamName: dashboard.team.name,
+      publicId: deck.publicId,
+      versionId,
+    })
+    const publishedArtifact = await writePublishedArtifact({
+      publicId: deck.publicId,
+      versionId,
+      html: artifactHtml,
+      metadata: {
+        deckTitle: source.title,
+        publishedAt: Date.now(),
+        label,
+      },
+    })
     const version = {
-      id: nanoid(12),
+      id: versionId,
       label,
       createdAt: Date.now(),
       status: "published" as const,
       source,
-      artifactHtml: buildStandaloneDeckHtml(source, slugify(source.title)),
+      artifactHtml,
+      artifactStorageKey: publishedArtifact.artifactStorageKey,
+      artifactUrl: publishedArtifact.artifactUrl,
       passwordHash,
     }
 
@@ -365,6 +645,7 @@ export const repository = {
         source,
         title: source.title,
         description: source.summary,
+        slug: slugify(source.title),
         updatedAt: Date.now(),
         status: "published",
         versions: [version, ...(deck.versions ?? [])],
@@ -382,10 +663,11 @@ export const repository = {
       return demoStore.randomizeTheme(userId, deckId)
     }
 
-    const deck = await getDeckFromConvex(deckId)
-    if (!deck) {
-      throw new Error("Deck not found")
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
     }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
 
     const source = {
       ...deck.source,
@@ -409,7 +691,11 @@ export const repository = {
       return demoStore.restoreCheckpoint(userId, deckId, checkpointId)
     }
 
-    const deck = await getDeckFromConvex(deckId)
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
     const checkpoint = deck?.checkpoints.find((item) => item.id === checkpointId)
     if (!deck || !checkpoint) {
       throw new Error("Checkpoint not found")
@@ -419,6 +705,9 @@ export const repository = {
       deckId,
       patch: {
         source: checkpoint.source,
+        title: checkpoint.source.title,
+        description: checkpoint.source.summary,
+        slug: slugify(checkpoint.source.title),
         updatedAt: Date.now(),
       },
     })
@@ -431,10 +720,11 @@ export const repository = {
       return demoStore.createReviewRequest(userId, deckId, versionId, title)
     }
 
-    const deck = await getDeckFromConvex(deckId)
-    if (!deck) {
-      throw new Error("Deck not found")
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
     }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
 
     const review: ReviewRequest = {
       id: nanoid(10),
@@ -457,7 +747,68 @@ export const repository = {
     return review
   },
 
-  async addReviewComment(token: string, input: { authorName: string; body: string; slideId?: string }) {
+  async addAsset(userId: string, deckId: string, asset: Omit<AssetRecord, "id">) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.addAsset(userId, deckId, asset)
+    }
+
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
+
+    const createdAsset: AssetRecord = {
+      id: nanoid(8),
+      ...asset,
+    }
+
+    await createConvexClient().mutation(convexApi.app.patchDeck, {
+      deckId,
+      patch: {
+        assets: [createdAsset, ...(deck.assets ?? [])],
+        updatedAt: Date.now(),
+      },
+    })
+
+    return this.getDeckEditor(userId, deckId)
+  },
+
+  async saveExperiment(userId: string, deckId: string, experiment: Omit<DeckExperiment, "id"> | null) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.saveExperiment(userId, deckId, experiment)
+    }
+
+    const dashboard = await this.getDashboard(userId)
+    if (!dashboard) {
+      throw new Error("Unable to load dashboard")
+    }
+    const deck = assertDeckAccess(dashboard, await getDeckFromConvex(userId, deckId))
+
+    await createConvexClient().mutation(convexApi.app.patchDeck, {
+      deckId,
+      patch: {
+        experiment: experiment
+          ? {
+              id: deck.experiment?.id ?? nanoid(10),
+              ...experiment,
+            }
+          : undefined,
+        updatedAt: Date.now(),
+      },
+    })
+
+    return this.getDeckEditor(userId, deckId)
+  },
+
+  async addReviewComment(token: string, input: {
+    authorName: string
+    body: string
+    slideId?: string
+    status?: "comment" | "suggestion"
+    suggestedPrompt?: string
+    parentCommentId?: string
+  }) {
     if (!hasConvexAdminEnv()) {
       return demoStore.addReviewComment(token, input)
     }
@@ -474,7 +825,9 @@ export const repository = {
         body: input.body,
         createdAt: Date.now(),
         slideId: input.slideId,
-        status: "comment" as const,
+        status: input.status ?? "comment",
+        suggestedPrompt: input.suggestedPrompt,
+        parentCommentId: input.parentCommentId,
       },
       ...reviewView.review.comments,
     ]
@@ -498,6 +851,77 @@ export const repository = {
     })
 
     return comments[0]
+  },
+
+  async updateReviewStatus(token: string, status: ReviewRequest["status"]) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.updateReviewStatus(token, status)
+    }
+
+    const reviewView = await this.getReviewView(token)
+    if (!reviewView) {
+      throw new Error("Review not found")
+    }
+
+    const reviewRequests = reviewView.deck.reviewRequests.map((review) =>
+      review.token === token
+        ? {
+            ...review,
+            status,
+          }
+        : review,
+    )
+
+    await createConvexClient().mutation(convexApi.app.patchDeck, {
+      deckId: reviewView.deck.id,
+      patch: {
+        reviewRequests,
+        updatedAt: Date.now(),
+      },
+    })
+
+    return status
+  },
+
+  async updateReviewComment(
+    token: string,
+    commentId: string,
+    patch: Partial<Pick<ReviewRequest["comments"][number], "status" | "appliedAt">>,
+  ) {
+    if (!hasConvexAdminEnv()) {
+      return demoStore.updateReviewComment(token, commentId, patch)
+    }
+
+    const reviewView = await this.getReviewView(token)
+    if (!reviewView) {
+      throw new Error("Review not found")
+    }
+
+    const reviewRequests = reviewView.deck.reviewRequests.map((review) =>
+      review.token === token
+        ? {
+            ...review,
+            comments: review.comments.map((comment) =>
+              comment.id === commentId
+                ? {
+                    ...comment,
+                    ...patch,
+                  }
+                : comment,
+            ),
+          }
+        : review,
+    )
+
+    await createConvexClient().mutation(convexApi.app.patchDeck, {
+      deckId: reviewView.deck.id,
+      patch: {
+        reviewRequests,
+        updatedAt: Date.now(),
+      },
+    })
+
+    return patch
   },
 
   async getPublicDeck(teamSlug: string, deckSlug: string) {

@@ -1,13 +1,19 @@
 import { nanoid } from "nanoid"
 import { generateObject, streamObject } from "ai"
 
+import { applyBrandKitToSource, fetchFirecrawlBrandContext } from "@/lib/brand-kit"
 import { remixTheme, themeLibrary } from "@/lib/deck-runtime"
 import { deckSourceSchema } from "@/lib/ai/schema"
 import { resolveLanguageModel, type ProviderKey } from "@/lib/ai/provider-registry"
 import type { DeckSource, GenerationInput } from "@/lib/types"
 
-function createFallbackDeck(input: GenerationInput): DeckSource {
-  const text = [input.rawText, input.sourceUrl, ...input.files.map((file) => file.content)]
+function createFallbackDeck(
+  input: GenerationInput,
+  sourceContext?: {
+    pageMarkdown?: string
+  },
+): DeckSource {
+  const text = [input.rawText, input.sourceUrl, sourceContext?.pageMarkdown, ...input.files.map((file) => file.content)]
     .filter(Boolean)
     .join("\n\n")
     .slice(0, 4000)
@@ -175,14 +181,21 @@ function createFallbackDeck(input: GenerationInput): DeckSource {
   }
 }
 
-function buildPrompt(input: GenerationInput) {
+function buildPrompt(
+  input: GenerationInput,
+  sourceContext?: {
+    pageMarkdown?: string
+    brandSummary?: string
+  },
+) {
   const fileContext = input.files
     .map((file) => `File: ${file.name}\n${file.content.slice(0, 1600)}`)
     .join("\n\n")
 
   return `
 You are generating a code-based presentation deck.
-Create a polished but concise narrative for an audience that can publish as standalone HTML.
+Create a polished but concise narrative for an audience that will publish as a standalone HTML slide document.
+Optimize for full-screen sections, minimal overflow, strong typography, clear side panels, and a final CTA / lead-capture moment.
 
 User prompt:
 ${input.prompt || "Create a crisp, well-structured deck."}
@@ -196,7 +209,48 @@ ${input.rawText || "No pasted content provided."}
 
 File context:
 ${fileContext || "No files uploaded."}
+
+Scraped page content:
+${sourceContext?.pageMarkdown?.slice(0, 3500) || "No page scrape available."}
+
+Brand system:
+${sourceContext?.brandSummary || "No structured brand kit available."}
+
+If files include OCR or extracted document structure, use that structured context directly instead of treating files as opaque attachments.
   `.trim()
+}
+
+async function resolveSourceContext(input: GenerationInput) {
+  if (!input.sourceUrl) {
+    return null
+  }
+
+  try {
+    const firecrawl = await fetchFirecrawlBrandContext(input.sourceUrl)
+    return {
+      firecrawl,
+      pageMarkdown: firecrawl?.markdown,
+      brandSummary: firecrawl?.brandKit
+        ? JSON.stringify({
+            colors: firecrawl.brandKit.colors,
+            fonts: firecrawl.brandKit.fonts,
+            typography: firecrawl.brandKit.typography,
+            taglines: firecrawl.brandKit.taglines,
+            audiences: firecrawl.brandKit.audiences,
+            personality: firecrawl.brandKit.personality,
+            guidelines: firecrawl.brandKit.guidelines,
+            differentiators: firecrawl.brandKit.differentiators,
+            composition: firecrawl.brandKit.composition,
+            components: firecrawl.brandKit.components,
+            notes: firecrawl.brandKit.notes,
+            logos: firecrawl.brandKit.logos,
+            imagery: firecrawl.brandKit.imagery,
+          })
+        : undefined,
+    }
+  } catch {
+    return null
+  }
 }
 
 export async function generateDeckSource(input: GenerationInput, options?: {
@@ -204,12 +258,14 @@ export async function generateDeckSource(input: GenerationInput, options?: {
   model?: string
 }) {
   const resolved = resolveLanguageModel(options?.provider, options?.model)
+  const sourceContext = await resolveSourceContext(input)
 
   if (!resolved) {
+    const fallback = createFallbackDeck(input, sourceContext ? { pageMarkdown: sourceContext.pageMarkdown } : undefined)
     return {
       provider: "fallback" as const,
       modelName: "heuristic",
-      object: createFallbackDeck(input),
+      object: applyBrandKitToSource(fallback, input.themeMode, sourceContext?.firecrawl),
     }
   }
 
@@ -217,7 +273,10 @@ export async function generateDeckSource(input: GenerationInput, options?: {
     model: resolved.model,
     schema: deckSourceSchema,
     temperature: 0.8,
-    prompt: buildPrompt(input),
+    prompt: buildPrompt(input, sourceContext ? {
+      pageMarkdown: sourceContext.pageMarkdown,
+      brandSummary: sourceContext.brandSummary,
+    } : undefined),
     schemaName: "deck_source",
     schemaDescription:
       "A polished slide deck with brand details, CTA, lead capture, poll, and 4-8 slides.",
@@ -226,7 +285,7 @@ export async function generateDeckSource(input: GenerationInput, options?: {
   return {
     provider: resolved.provider,
     modelName: resolved.modelName,
-    object: generated.object,
+    object: applyBrandKitToSource(generated.object, input.themeMode, sourceContext?.firecrawl),
   }
 }
 
@@ -235,13 +294,21 @@ export async function streamDeckSource(
   options?: { provider?: ProviderKey; model?: string },
 ) {
   const resolved = resolveLanguageModel(options?.provider, options?.model)
+  const sourceContext = await resolveSourceContext(input)
 
   if (!resolved) {
+    const fallback = applyBrandKitToSource(
+      createFallbackDeck(input, sourceContext ? { pageMarkdown: sourceContext.pageMarkdown } : undefined),
+      input.themeMode,
+      sourceContext?.firecrawl,
+    )
     return {
       provider: "fallback" as const,
       modelName: "heuristic",
-      partials: [createFallbackDeck(input)],
-      finalObject: createFallbackDeck(input),
+      partialObjectStream: (async function* () {
+        yield fallback
+      })(),
+      finalObject: Promise.resolve(fallback),
     }
   }
 
@@ -249,21 +316,23 @@ export async function streamDeckSource(
     model: resolved.model,
     schema: deckSourceSchema,
     temperature: 0.8,
-    prompt: buildPrompt(input),
+    prompt: buildPrompt(input, sourceContext ? {
+      pageMarkdown: sourceContext.pageMarkdown,
+      brandSummary: sourceContext.brandSummary,
+    } : undefined),
     schemaName: "deck_source",
   })
-
-  const partials: DeckSource[] = []
-  for await (const partial of result.partialObjectStream) {
-    partials.push(partial as DeckSource)
-  }
-
-  const finalObject = await result.object
 
   return {
     provider: resolved.provider,
     modelName: resolved.modelName,
-    partials,
-    finalObject,
+    partialObjectStream: (async function* () {
+      for await (const partial of result.partialObjectStream) {
+        yield applyBrandKitToSource(partial as DeckSource, input.themeMode, sourceContext?.firecrawl)
+      }
+    })(),
+    finalObject: result.object.then((object) =>
+      applyBrandKitToSource(object, input.themeMode, sourceContext?.firecrawl),
+    ),
   }
 }

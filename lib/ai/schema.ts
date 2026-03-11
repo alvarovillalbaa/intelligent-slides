@@ -83,6 +83,37 @@ export const deckSourceSchema = z.object({
     descriptors: z.array(z.string()).default([]),
     palette: z.array(z.string()).default([]),
     logos: z.array(z.string()).default([]),
+    brandKit: z
+      .object({
+        source: z.enum(["firecrawl", "manual"]),
+        extractedAt: z.number().optional(),
+        fonts: z.array(z.string()).default([]),
+        colors: z.record(z.string(), z.string()).default({}),
+        logos: z.array(z.string()).default([]),
+        imagery: z.array(z.string()).default([]),
+        notes: z.array(z.string()).default([]),
+        taglines: z.array(z.string()).default([]),
+        audiences: z.array(z.string()).default([]),
+        personality: z.array(z.string()).default([]),
+        guidelines: z.array(z.string()).default([]),
+        differentiators: z.array(z.string()).default([]),
+        typography: z
+          .object({
+            display: z.array(z.string()).default([]),
+            body: z.array(z.string()).default([]),
+            mono: z.array(z.string()).default([]),
+          })
+          .optional(),
+        composition: z
+          .object({
+            layout: z.array(z.string()).default([]),
+            spacing: z.array(z.string()).default([]),
+            motion: z.array(z.string()).default([]),
+          })
+          .optional(),
+        components: z.array(z.string()).default([]),
+      })
+      .optional(),
   }),
   theme: themeTokensSchema,
   cta: z.object({

@@ -21,6 +21,23 @@ export const getSessionByTokenHash = query({
   },
 })
 
+export const getInviteByToken = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const invites = await ctx.db.query("invites").collect()
+    const invite = invites.find((item) => item.token === args.token) ?? null
+
+    return invite
+      ? {
+          ...invite,
+          id: String(invite._id),
+        }
+      : null
+  },
+})
+
 export const createUserWithTeam = mutation({
   args: {
     name: v.string(),
@@ -85,6 +102,113 @@ export const createUserWithTeam = mutation({
       role: "admin",
       createdAt,
     }
+  },
+})
+
+export const createInvite = mutation({
+  args: {
+    invite: v.any(),
+  },
+  handler: async (ctx, args) => {
+    const inviteId = await ctx.db.insert("invites", args.invite)
+    return {
+      ...args.invite,
+      id: String(inviteId),
+    }
+  },
+})
+
+export const acceptInvite = mutation({
+  args: {
+    token: v.string(),
+    name: v.string(),
+    passwordHash: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const invites = await ctx.db.query("invites").collect()
+    const invite = invites.find((item) => item.token === args.token)
+
+    if (!invite || invite.status !== "pending") {
+      throw new Error("Invite not found")
+    }
+
+    const users = await ctx.db.query("users").collect()
+    if (users.some((user) => user.email === invite.email)) {
+      throw new Error("That email already has an account")
+    }
+
+    const userId = await ctx.db.insert("users", {
+      name: args.name,
+      email: invite.email,
+      passwordHash: args.passwordHash,
+      teamId: invite.teamId,
+      workspaceId: invite.workspaceId,
+      role: invite.role,
+      createdAt: Date.now(),
+    })
+
+    const team = await ctx.db.get(invite.teamId as never)
+    if (team) {
+      await ctx.db.patch(team._id as never, {
+        members: [
+          ...(Array.isArray(team.members) ? team.members : []),
+          {
+            userId: String(userId),
+            name: args.name,
+            email: invite.email,
+            role: invite.role,
+          },
+        ],
+      })
+    }
+
+    await ctx.db.patch(invite._id as never, {
+      status: "accepted",
+      acceptedAt: Date.now(),
+    })
+
+    return {
+      id: String(userId),
+      name: args.name,
+      email: invite.email,
+      teamId: invite.teamId,
+      workspaceId: invite.workspaceId,
+      role: invite.role,
+      createdAt: Date.now(),
+    }
+  },
+})
+
+export const updateTeamMemberRole = mutation({
+  args: {
+    teamId: v.string(),
+    targetUserId: v.string(),
+    role: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.targetUserId as never)
+    const team = await ctx.db.get(args.teamId as never)
+
+    if (!user || !team) {
+      throw new Error("Team member not found")
+    }
+
+    await ctx.db.patch(user._id as never, {
+      role: args.role,
+    })
+
+    await ctx.db.patch(team._id as never, {
+      members: (Array.isArray(team.members) ? team.members : []).map((member: { userId: string }) =>
+        member.userId === args.targetUserId
+          ? {
+              ...member,
+              role: args.role,
+            }
+          : member,
+      ),
+    })
+
+    return { ok: true }
   },
 })
 

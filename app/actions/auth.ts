@@ -2,12 +2,14 @@
 
 import { redirect } from "next/navigation"
 
+import { hashSecret } from "@/lib/auth"
 import {
   authenticateUser,
   clearSession,
   establishSession,
   registerUser,
 } from "@/lib/server-auth"
+import { repository } from "@/lib/repository"
 
 export interface AuthFormState {
   error?: string
@@ -55,4 +57,29 @@ export async function signUpAction(_: AuthFormState, formData: FormData): Promis
 export async function signOutAction() {
   await clearSession()
   redirect("/")
+}
+
+export async function acceptInviteAction(_: AuthFormState, formData: FormData): Promise<AuthFormState> {
+  const token = String(formData.get("token") ?? "")
+  const name = String(formData.get("name") ?? "").trim()
+  const password = String(formData.get("password") ?? "")
+
+  if (!token || !name || !password) {
+    return { error: "Name and password are required to join the team." }
+  }
+
+  try {
+    const user = await repository.acceptInvite({
+      token,
+      name,
+      passwordHash: hashSecret(password),
+    })
+    await establishSession(user.id)
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "Unable to accept this invite.",
+    }
+  }
+
+  redirect("/app")
 }

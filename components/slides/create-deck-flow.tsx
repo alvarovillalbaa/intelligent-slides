@@ -22,17 +22,35 @@ async function readFiles(files: FileList | null) {
     return []
   }
 
-  const parsed = await Promise.all(
-    Array.from(files).map(async (file) => ({
-      name: file.name,
-      type: file.type,
-      content: file.type.startsWith("text/") || file.type.includes("json") || file.name.endsWith(".md")
-        ? await file.text()
-        : `Binary file uploaded: ${file.name}`,
-    })),
-  )
+  const formData = new FormData()
+  for (const file of Array.from(files)) {
+    formData.append("files", file)
+  }
 
-  return parsed
+  const response = await fetch("/api/file-context", {
+    method: "POST",
+    body: formData,
+  })
+
+  if (!response.ok) {
+    return Promise.all(
+      Array.from(files).map(async (file) => ({
+        name: file.name,
+        type: file.type,
+        content: await file.text().catch(() => `Uploaded asset: ${file.name}`),
+      })),
+    )
+  }
+
+  const payload = (await response.json()) as {
+    files: Array<{
+      name: string
+      type: string
+      content: string
+    }>
+  }
+
+  return payload.files
 }
 
 async function* streamResponse(response: Response) {
@@ -159,7 +177,7 @@ export function CreateDeckFlow({
         },
         source: generatedSource,
       })
-      router.push(`/app/workspaces/${result.workspaceSlug}/decks/${result.deckId}`)
+      router.push(`/app/workspaces/${workspaceSlug}/decks/${result.deckId}`)
     })
   }
 
@@ -203,7 +221,7 @@ export function CreateDeckFlow({
               <div>
                 <p className="text-sm font-medium">Files</p>
                 <p className="text-sm text-muted-foreground">
-                  Text, markdown, or notes files become extra context in the generation pass.
+                  PDFs, DOCX files, text docs, and images are parsed into deck-ready context before generation.
                 </p>
               </div>
               <Button

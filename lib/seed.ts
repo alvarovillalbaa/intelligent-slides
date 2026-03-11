@@ -212,6 +212,12 @@ function createAnalytics(): DeckAnalytics {
     ctaClicks: 31,
     leads: 12,
     slideViews: {},
+    pollVotes: {
+      "Story arc": 18,
+      "Design system": 11,
+      "CTA placement": 7,
+    },
+    variantMetrics: {},
   }
 }
 
@@ -375,6 +381,7 @@ export function createSeedState(): RepositoryState {
         role: "admin",
       },
     ],
+    invites: [],
   }
 
   const user: UserRecord = {
@@ -396,5 +403,6 @@ export function createSeedState(): RepositoryState {
     decks: [deck],
     events: [],
     leads: [],
+    invites: [],
   }
 }

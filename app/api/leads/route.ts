@@ -5,7 +5,7 @@ import { z } from "zod"
 import { repository } from "@/lib/repository"
 
 const leadSchema = z.object({
-  deckId: z.string(),
+  deckId: z.string().optional(),
   publicId: z.string(),
   versionId: z.string().optional(),
   payload: z.record(z.string(), z.string()),

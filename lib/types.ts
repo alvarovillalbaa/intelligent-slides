@@ -42,6 +42,34 @@ export interface BrandProfile {
   descriptors: string[]
   palette: string[]
   logos: string[]
+  brandKit?: BrandKit
+}
+
+export interface BrandKit {
+  source: "firecrawl" | "manual"
+  extractedAt?: number
+  fonts: string[]
+  colors: Record<string, string>
+  logos: string[]
+  imagery: string[]
+  notes: string[]
+  taglines?: string[]
+  audiences?: string[]
+  personality?: string[]
+  guidelines?: string[]
+  differentiators?: string[]
+  typography?: {
+    display: string[]
+    body: string[]
+    mono: string[]
+  }
+  composition?: {
+    layout: string[]
+    spacing: string[]
+    motion: string[]
+  }
+  components?: string[]
+  raw?: Record<string, unknown>
 }
 
 export interface CTAButton {
@@ -152,6 +180,8 @@ export interface DeckVersion {
   status: "preview" | "published"
   source: DeckSource
   artifactHtml: string
+  artifactStorageKey?: string
+  artifactUrl?: string
   passwordHash?: string
 }
 
@@ -163,6 +193,8 @@ export interface ReviewComment {
   slideId?: string
   status: "comment" | "resolved" | "suggestion"
   suggestedPrompt?: string
+  parentCommentId?: string
+  appliedAt?: number
 }
 
 export interface ReviewRequest {
@@ -183,6 +215,19 @@ export interface DeckAnalytics {
   ctaClicks: number
   leads: number
   slideViews: Record<string, number>
+  pollVotes: Record<string, number>
+  variantMetrics: Record<
+    string,
+    {
+      views: number
+      uniqueVisitors: number
+      completions: number
+      ctaClicks: number
+      leads: number
+      pollVotes: number
+      avgTimeSeconds: number
+    }
+  >
 }
 
 export interface DeckExperiment {
@@ -204,6 +249,9 @@ export interface AssetRecord {
   title: string
   description: string
   url: string
+  storageKey?: string
+  contentType?: string
+  sizeBytes?: number
 }
 
 export interface DeckRecord {
@@ -247,6 +295,20 @@ export interface TeamMemberRecord {
   role: Role
 }
 
+export interface TeamInviteRecord {
+  id: string
+  teamId: string
+  workspaceId: string
+  email: string
+  invitedName: string
+  role: Role
+  token: string
+  status: "pending" | "accepted" | "revoked"
+  createdAt: number
+  invitedByUserId: string
+  acceptedAt?: number
+ }
+
 export interface TeamRecord {
   id: string
   slug: string
@@ -254,6 +316,7 @@ export interface TeamRecord {
   brand: BrandProfile
   workspaces: WorkspaceRecord[]
   members: TeamMemberRecord[]
+  invites: TeamInviteRecord[]
 }
 
 export interface UserRecord {
@@ -277,19 +340,20 @@ export interface SessionRecord {
 
 export interface AnalyticsEvent {
   id: string
-  deckId: string
+  deckId?: string
   versionId?: string
   publicId: string
-  type: "view" | "slide_view" | "cta_click" | "lead_submit" | "poll_vote"
+  type: "view" | "slide_view" | "cta_click" | "lead_submit" | "poll_vote" | "deck_complete" | "session_end"
   slideId?: string
   value?: string
   createdAt: number
   visitorId: string
+  durationMs?: number
 }
 
 export interface LeadRecord {
   id: string
-  deckId: string
+  deckId?: string
   versionId?: string
   publicId: string
   createdAt: number
@@ -338,4 +402,5 @@ export interface RepositoryState {
   decks: DeckRecord[]
   events: AnalyticsEvent[]
   leads: LeadRecord[]
+  invites: TeamInviteRecord[]
 }

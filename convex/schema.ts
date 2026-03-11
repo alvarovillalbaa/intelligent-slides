@@ -17,6 +17,21 @@ export default defineSchema({
     createdAt: v.number(),
     expiresAt: v.number(),
   }).index("by_token_hash", ["tokenHash"]),
+  invites: defineTable({
+    teamId: v.string(),
+    workspaceId: v.string(),
+    email: v.string(),
+    invitedName: v.string(),
+    role: v.string(),
+    token: v.string(),
+    status: v.string(),
+    createdAt: v.number(),
+    invitedByUserId: v.string(),
+    acceptedAt: v.optional(v.number()),
+  })
+    .index("by_token", ["token"])
+    .index("by_team_id", ["teamId"])
+    .index("by_email", ["email"]),
   teams: defineTable({
     slug: v.string(),
     name: v.string(),

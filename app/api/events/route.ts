@@ -5,13 +5,14 @@ import { z } from "zod"
 import { repository } from "@/lib/repository"
 
 const eventSchema = z.object({
-  deckId: z.string(),
+  deckId: z.string().optional(),
   publicId: z.string(),
   versionId: z.string().optional(),
-  type: z.enum(["view", "slide_view", "cta_click", "lead_submit", "poll_vote"]),
+  type: z.enum(["view", "slide_view", "cta_click", "lead_submit", "poll_vote", "deck_complete", "session_end"]),
   slideId: z.string().optional(),
   value: z.string().optional(),
   visitorId: z.string().optional(),
+  durationMs: z.number().optional(),
 })
 
 export async function POST(request: Request) {
